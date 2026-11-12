@@ -1,3 +1,4 @@
+
 import os
 import json
 import logging
@@ -6,7 +7,7 @@ from http.server import BaseHTTPRequestHandler
 
 TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
 API = f"https://api.telegram.org/bot{TOKEN}/"
 
@@ -32,95 +33,116 @@ PACKAGES = {
 }
 
 
-def tg(method, data):
-    r = requests.post(
-        API + method, json=data, timeout=20
+def telegram(method, data):
+    response = requests.post(
+        API + method, json=data, timeout=15
     )
-    r.raise_for_status()
-    result = r.json()
+    response.raise_for_status()
+    result = response.json()
+
     if not result.get("ok"):
         raise RuntimeError(str(result))
+
     return result["result"]
 
 
-def send(chat_id, message, markup=None):
-    data = {
-        "chat_id": chat_id,
-        "text": message
-    }
+def send(chat_id, text, markup=None):
+    data = {"chat_id": chat_id, "text": text}
+
     if markup:
         data["reply_markup"] = markup
-    return tg("sendMessage", data)
+
+    return telegram("sendMessage", data)
 
 
-def ask(chat_id, message):
-    return send(chat_id, message, {
+def ask(chat_id, text):
+    return send(chat_id, text, {
         "force_reply": True,
         "selective": True
     })
 
 
-def answer_callback(query_id, message=""):
-    tg("answerCallbackQuery", {
+def answer(query_id, text=""):
+    telegram("answerCallbackQuery", {
         "callback_query_id": query_id,
-        "text": message
+        "text": text
     })
 
 
-def package_keyboard():
+def show_packages(chat_id):
     rows = []
+
     for key, (name, price) in PACKAGES.items():
         rows.append([{
             "text": f"{name} - {price:,} Ks",
             "callback_data": f"pkg:{key}"
         }])
-    return {"inline_keyboard": rows}
+
+    send(chat_id,
+         "💎 League 2 Diamond Shop\n\nPackage ရွေးချယ်ပါ။",
+         {"inline_keyboard": rows})
 
 
-def start(chat_id):
-    send(
-        chat_id,
-        "💎 Welcome to League 2 Diamond Shop!\n\n"
-        "ဝယ်ယူလိုသော Diamond Package ကို ရွေးချယ်ပါ။",
-        package_keyboard()
-    )
-
-
-def handle_message(m):
-    chat_id = m["chat"]["id"]
-    text = m.get("text", "").strip()
-    reply = m.get("reply_to_message") or {}
+def handle_message(message):
+    chat_id = message["chat"]["id"]
+    text = message.get("text", "").strip()
+    reply = message.get("reply_to_message") or {}
     prompt = reply.get("text", "")
 
     if text == "/start":
-        start(chat_id)
+        show_packages(chat_id)
         return
 
     if text == "/cancel":
-        start(chat_id)
+        show_packages(chat_id)
         return
 
-    # Customer sends payment receipt
-    if prompt.startswith("RECEIPT|"):
-        if chat_id == ADMIN_ID:
+    # User ID
+    if prompt.startswith("USER|"):
+        pkg = prompt.split("|")[1]
+
+        if not text.isdigit():
+            ask(chat_id, prompt + "\nUser ID ကို နံပါတ်ဖြင့်ထည့်ပါ။")
             return
 
-        if not m.get("photo"):
-            ask(
-                chat_id,
-                prompt + "\n\nဓာတ်ပုံဖြင့် ပြေစာပို့ပေးပါ။"
-            )
+        ask(chat_id, f"SERVER|{pkg}|{text}\n\nServer ID ထည့်ပါ။")
+        return
+
+    # Server ID
+    if prompt.startswith("SERVER|"):
+        _, pkg, uid = prompt.split("|")
+
+        if not text.isdigit():
+            ask(chat_id, prompt + "\nServer ID မှန်ကန်စွာထည့်ပါ။")
+            return
+
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "KPay",
+                 "callback_data": f"pay:k:{pkg}:{uid}:{text}"},
+                {"text": "WavePay",
+                 "callback_data": f"pay:w:{pkg}:{uid}:{text}"}
+            ]]
+        }
+
+        send(chat_id, "ငွေပေးချေမှုနည်းလမ်း ရွေးပါ။", keyboard)
+        return
+
+    # Receipt
+    if prompt.startswith("RECEIPT|"):
+        if not message.get("photo"):
+            ask(chat_id, prompt + "\nပြေစာ Screenshot ပို့ပါ။")
             return
 
         _, pkg, uid, sid, payment = prompt.split("|")
         name, price = PACKAGES[pkg]
-        photo_id = m["photo"][-1]["file_id"]
+        photo = message["photo"][-1]["file_id"]
 
         caption = (
-            "💎 NEW DIAMOND ORDER\n\n"
+            "💎 NEW ORDER\n\n"
             f"Package: {name}\n"
             f"Price: {price:,} Ks\n"
-            f"MLBB User ID: {uid}\n"
+            f"User ID: {uid}\n"
             f"Server ID: {sid}\n"
             f"Payment: {payment}\n"
             f"Customer ID: {chat_id}\n"
@@ -129,117 +151,66 @@ def handle_message(m):
 
         keyboard = {
             "inline_keyboard": [[
-                {
-                    "text": "✅ APPROVE",
-                    "callback_data": f"approve:{chat_id}"
-                },
-                {
-                    "text": "❌ REJECT",
-                    "callback_data": f"reject:{chat_id}"
-                }
+                {"text": "✅ APPROVE",
+                 "callback_data": f"approve:{chat_id}"},
+                {"text": "❌ REJECT",
+                 "callback_data": f"reject:{chat_id}"}
             ]]
         }
 
-        tg("sendPhoto", {
+        telegram("sendPhoto", {
             "chat_id": ADMIN_ID,
-            "photo": photo_id,
+            "photo": photo,
             "caption": caption,
             "reply_markup": keyboard
         })
 
-        send(
-            chat_id,
-            "✅ Order တင်ပြီးပါပြီ။\n"
-            "Admin မှ စစ်ဆေးပေးပါမယ်။"
-        )
+        send(chat_id,
+             "✅ Order တင်ပြီးပါပြီ။ Admin စစ်ဆေးပေးပါမယ်။")
         return
 
-    # Customer enters User ID
-    if prompt.startswith("USER|"):
-        pkg = prompt.split("|")[1]
-
-        if not text.isdigit():
-            ask(chat_id, prompt + "\nUser ID ကို နံပါတ်ဖြင့် ထည့်ပါ။")
-            return
-
-        ask(chat_id, f"SERVER|{pkg}|{text}\n\nMLBB Server ID ထည့်ပါ။")
-        return
-
-    # Customer enters Server ID
-    if prompt.startswith("SERVER|"):
-        _, pkg, uid = prompt.split("|")
-
-        if not text.isdigit():
-            ask(chat_id, prompt + "\nServer ID ကို နံပါတ်ဖြင့် ထည့်ပါ။")
-            return
-
-        keyboard = {
-            "inline_keyboard": [[
-                {
-                    "text": "KPay",
-                    "callback_data": f"pay:k:{pkg}:{uid}:{text}"
-                },
-                {
-                    "text": "WavePay",
-                    "callback_data": f"pay:w:{pkg}:{uid}:{text}"
-                }
-            ]]
-        }
-
-        send(chat_id, "ငွေပေးချေမည့်နည်းလမ်း ရွေးချယ်ပါ။", keyboard)
-        return
-
-    if m.get("photo"):
-        send(
-            chat_id,
-            "ပြေစာကို သက်ဆိုင်ရာ Order ရဲ့ ပြေစာတောင်းထားတဲ့ Message ကို Reply လုပ်ပြီး ပို့ပေးပါ။"
-        )
-        return
-
-    send(chat_id, "စတင်ရန် /start နှိပ်ပါ။")
+    send(chat_id, "/start နှိပ်ပြီး စတင်ပါ။")
 
 
-def handle_callback(c):
-    data = c["data"]
-    user_id = c["from"]["id"]
-    chat_id = c["message"]["chat"]["id"]
+def handle_callback(callback):
+    data = callback["data"]
+    sender_id = callback["from"]["id"]
+    chat_id = callback["message"]["chat"]["id"]
+    query_id = callback["id"]
 
     if data.startswith("pkg:"):
-        if chat_id != user_id:
-            answer_callback(c["id"], "ကိုယ်ပိုင် Chat မှာသာ ဝယ်ယူပါ။")
+        if chat_id != sender_id:
+            answer(query_id, "ကိုယ်ပိုင် Chat မှာသာ ဝယ်ယူပါ။")
             return
 
         pkg = data.split(":")[1]
+
         if pkg not in PACKAGES:
-            answer_callback(c["id"], "Package မရှိပါ။")
+            answer(query_id, "Package မရှိပါ။")
             return
 
         name, price = PACKAGES[pkg]
-        ask(
-            chat_id,
-            f"USER|{pkg}\n"
-            f"ရွေးချယ်ထားသော Package: {name}\n"
-            f"ဈေးနှုန်း: {price:,} Ks\n\n"
-            "MLBB User ID ထည့်ပေးပါ။"
-        )
-        answer_callback(c["id"], "Package ရွေးချယ်ပြီးပါပြီ။")
+
+        ask(chat_id,
+            f"USER|{pkg}\n{name} - {price:,} Ks\n\n"
+            "MLBB User ID ထည့်ပေးပါ။")
+
+        answer(query_id, "Package ရွေးပြီးပါပြီ။")
         return
 
     if data.startswith("pay:"):
-        if chat_id != user_id:
-            answer_callback(c["id"], "ကိုယ်ပိုင် Chat မှာသာ ဝယ်ယူပါ။")
+        if chat_id != sender_id:
+            answer(query_id, "ကိုယ်ပိုင် Chat မှာသာ ဝယ်ယူပါ။")
             return
 
         _, method, pkg, uid, sid = data.split(":")
+
         if pkg not in PACKAGES:
-            answer_callback(c["id"], "Package မရှိပါ။")
+            answer(query_id, "Package မရှိပါ။")
             return
 
         payment = "KPay" if method == "k" else "WavePay"
-        number = (
-            "09422190218" if method == "k"
-            else "09893463559"
-        )
+        number = "09422190218" if method == "k" else "09893463559"
         name, price = PACKAGES[pkg]
 
         ask(
@@ -250,15 +221,15 @@ def handle_callback(c):
             f"Package: {name}\n"
             f"Amount: {price:,} Ks\n\n"
             "ငွေလွှဲပြီးပါက ဒီ Message ကို Reply လုပ်ပြီး "
-            "ပြေစာ Screenshot ပို့ပေးပါ။"
+            "ပြေစာ Screenshot ပို့ပါ။"
         )
-        answer_callback(c["id"], "ငွေပေးချေမှုနည်းလမ်း ရွေးပြီးပါပြီ။")
+
+        answer(query_id, "Payment ရွေးချယ်ပြီးပါပြီ။")
         return
 
-    # Only Admin can approve or reject
-    if data.startswith("approve:") or data.startswith("reject:"):
-        if user_id != ADMIN_ID:
-            answer_callback(c["id"], "Admin သာ အသုံးပြုနိုင်ပါသည်။")
+    if data.startswith(("approve:", "reject:")):
+        if sender_id != ADMIN_ID:
+            answer(query_id, "Admin သာ အသုံးပြုနိုင်ပါသည်။")
             return
 
         customer_id = int(data.split(":")[1])
@@ -266,18 +237,15 @@ def handle_callback(c):
 
         if approved:
             send(customer_id, "ထည့်လိုက်ပါပြီ✅")
-            answer_callback(c["id"], "Order Approved!")
+            answer(query_id, "Approved!")
         else:
-            send(
-                customer_id,
-                "❌ Order ကို ပယ်ဖျက်လိုက်ပါပြီ။ "
-                "Admin ကို ဆက်သွယ်ပါ။"
-            )
-            answer_callback(c["id"], "Order Rejected!")
+            send(customer_id,
+                 "❌ Order ပယ်ဖျက်လိုက်ပါပြီ။ Admin ကိုဆက်သွယ်ပါ။")
+            answer(query_id, "Rejected!")
 
-        tg("editMessageReplyMarkup", {
+        telegram("editMessageReplyMarkup", {
             "chat_id": chat_id,
-            "message_id": c["message"]["message_id"],
+            "message_id": callback["message"]["message_id"],
             "reply_markup": {"inline_keyboard": []}
         })
 
@@ -285,16 +253,19 @@ def handle_callback(c):
 class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+        body = b"League 2 Diamond Shop Bot Running"
         self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b"League 2 Diamond Shop Bot is running")
+        self.wfile.write(body)
 
     def do_POST(self):
-        if WEBHOOK_SECRET:
+        if SECRET:
             received = self.headers.get(
                 "X-Telegram-Bot-Api-Secret-Token", ""
             )
-            if received != WEBHOOK_SECRET:
+            if received != SECRET:
                 self.send_error(403)
                 return
 
@@ -304,16 +275,14 @@ class handler(BaseHTTPRequestHandler):
 
             if "message" in update:
                 handle_message(update["message"])
+
             elif "callback_query" in update:
                 handle_callback(update["callback_query"])
 
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-
         except Exception:
-            logging.exception("Telegram webhook error")
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-            import
+            logging.exception("Telegram Bot Error")
+
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+        
